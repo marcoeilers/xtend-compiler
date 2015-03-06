@@ -47,9 +47,10 @@ class CompilerTest {
 				var aVar = aNumber
 				aVar = aVar + 17
 				var blaVar = "bl"
+				//println("Test123")
 				for (var i = 0; i < aNumber; i = i + 1)
 					blaVar = blaVar + if (i % 2 == 0) "a" else "u"
-				return "something" + blaVar + (aVar * 2)
+				"something" + blaVar + (aVar * 2)
 			}
 		}
 		'''

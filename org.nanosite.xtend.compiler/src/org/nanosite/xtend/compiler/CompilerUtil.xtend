@@ -17,7 +17,6 @@ class CompilerUtil {
 		val short svalue = value as short
 		bytes.set(position, (svalue >> 8) as byte)
 		bytes.set(position + 1, (svalue % 256) as byte)
-		println(bytes)
 		bytes
 	}
 	

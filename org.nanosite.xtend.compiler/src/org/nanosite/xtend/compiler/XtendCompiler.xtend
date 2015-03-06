@@ -35,6 +35,12 @@ import org.eclipse.xtext.xbase.typesystem.IBatchTypeResolver
 import static org.nanosite.xtend.compiler.OpcodeFactory.*
 
 import static extension org.nanosite.xtend.compiler.CompilerUtil.*
+import org.eclipse.xtext.common.types.JvmTypeReference
+import org.eclipse.xtext.common.types.JvmType
+import org.eclipse.xtext.common.types.JvmTypeParameter
+import org.eclipse.xtext.xbase.typing.IJvmTypeReferenceProvider
+import org.eclipse.xtext.common.types.access.IJvmTypeProvider
+import org.eclipse.xtext.common.types.util.TypeReferences
 
 class XtendCompiler {
 	protected static final int ACC_PUBLIC = 0x0001
@@ -50,14 +56,23 @@ class XtendCompiler {
 	private List<byte[]> bytes
 	private Map<XtendFunction, Integer> freeLocal
 	private Map<XtendFunction, Map<JvmIdentifiableElement, Integer>> usedLocals
+	private ReturnAnalysisResult returnInfo
 
 	@Inject
 	private extension IXtendJvmAssociations jvmTypes
 
-	@Inject private XbaseInterpreter interpreter
+	@Inject 
+	private XbaseInterpreter interpreter
+	
 	@Inject
 	private IBatchTypeResolver typeResolver;
+	
+	@Inject
+	private TypeReferences typeProvider
 
+	@Inject
+	private ReturnValueAnalyzer returnAnalyzer
+	
 	def generateClass(XtendClass clazz) {
 		bytes = new ArrayList
 		addMagicNumber
@@ -68,12 +83,12 @@ class XtendCompiler {
 
 		bytes += getU2(constantPool.addClassEntry(clazz.qualifiedName))
 
-		bytes += getU2(constantPool.addClassEntry(clazz.extends?.qualifiedName ?: "java.lang.Object"))
+		bytes += getU2(constantPool.addClassEntry(clazz.extends?.qualifiedErasureName ?: "java.lang.Object"))
 
 		bytes += getU2(clazz.implements.size)
 
 		for (interf : clazz.implements) {
-			bytes += getU2(constantPool.addClassEntry(interf.qualifiedName))
+			bytes += getU2(constantPool.addClassEntry(interf.qualifiedErasureName))
 		}
 
 		bytes += getU2(clazz.inferredType.declaredFields.size)
@@ -120,8 +135,11 @@ class XtendCompiler {
 		
 		for (var i = 0; i < func.parameters.size; i++)
 			usedLocals.get(func).put(func.directlyInferredOperation.parameters.get(i), i + 1)
+			
+		returnInfo = returnAnalyzer.analyze(func)
 		
 		freeLocal.put(func, 1 + func.parameters.size)
+		
 		val flags = 0x0001
 		result += getU2(flags)
 
@@ -130,8 +148,8 @@ class XtendCompiler {
 		result +=
 			getU2(
 				constantPool.addUtf8Entry(
-					convertToMethodDescriptior(method.returnType.qualifiedName,
-						method.parameters.map[parameterType.qualifiedName])))
+					convertToMethodDescriptior(method.returnType.qualifiedErasureName,
+						method.parameters.map[parameterType.qualifiedErasureName])))
 
 		result += getU2(1)
 
@@ -179,7 +197,7 @@ class XtendCompiler {
 	def dispatch List<byte[]> compileExpression(XBlockExpression expr, XtendFunction func) {
 		val result = new ArrayList
 		for (e : expr.expressions)
-			result += e.compileExpression(func)
+			result += e.compileExpressionAndHandleReturnValue(func)
 		result
 	}
 	
@@ -193,7 +211,7 @@ class XtendCompiler {
 			result += compileExpressionToExpectedType(expr.right, func)
 			val resolved = typeResolver.resolveTypes(expr)
 			val type = resolved.getActualType(expr.right)
-			result += store(type.type.qualifiedName, newVarIndex)
+			result += store(type.type.qualifiedErasureName, newVarIndex)
 		}
 		result
 	}
@@ -205,26 +223,54 @@ class XtendCompiler {
 //	def dispatch List<byte[]> compileExpression(XForLoopExpression expr, XtendFunction func){
 //		
 //	}
-//	
+//		
+
+	def List<byte[]> compileExpressionAndHandleReturnValue(XExpression expr, XtendFunction func){
+		if (returnInfo.implicitlyReturned.contains(expr)){
+			println("implicit return for " + expr)
+			val result = new ArrayList
+			result += compileExpressionToExpectedType(expr, func)
+			result += returnType(func.directlyInferredOperation.returnType.qualifiedErasureName)
+			result
+		}else if (returnInfo.throwAwayReturnValue.contains(expr)){
+			println("throwing away return value for " + expr)
+			compileExpressionDiscardingResult(expr, func)
+		}else{
+			compileExpressionToExpectedType(expr, func)
+		}
+	}
+	
+	def List<byte[]> compileExpressionDiscardingResult(XExpression expr, XtendFunction func){
+		val result = new ArrayList
+		result += compileExpressionToExpectedType(expr, func)
+		if (!(expr.actualType.type instanceof JvmVoid))
+			result += pop
+		result
+	}
+	
 	def dispatch List<byte[]> compileExpression(XBasicForLoopExpression expr, XtendFunction func){
 		val result = new ArrayList
 		for (ie : expr.initExpressions)
-			result += ie.compileExpressionToExpectedType(func)
+			result += ie.compileExpressionDiscardingResult(func)
 
 		val check =  expr.expression.compileExpressionToExpectedType(func)
 		result += check
 		val startJump = newByteArrayOfSize(3)
+		changeStack("ifeq", -1)
+		startJump.setU1(0, 0x99)
 		result += startJump
 		
-		val each = expr.eachExpression.compileExpressionToExpectedType(func)
+		val each = expr.eachExpression.compileExpressionAndHandleReturnValue(func)
 		result += each
 		
 		val update = new ArrayList
 		for (ue : expr.updateExpressions)
-			update += ue.compileExpressionToExpectedType(func)
+			update += ue.compileExpressionDiscardingResult(func)
 		result += update
 			
 		val endJump = newByteArrayOfSize(3)
+		changeStack("goto", 0)
+		endJump.setU1(0, 0xa7)
 		result += endJump
 		
 		var endOffset = -3
@@ -241,20 +287,20 @@ class XtendCompiler {
 		}
 		startOffset += 3
 		
-		startJump.setU1(0, 0x99)
+		
 		startJump.setU2(1, startOffset)
 		
-		endJump.setU1(0, 0xa7)
+		
 		endJump.setU2(1, endOffset)
 		result
 	}
 	
 	def dispatch List<byte[]> compileExpression(XInstanceOfExpression expr, XtendFunction func) {
-		#[instanceofOp(expr.type.qualifiedName)]
+		#[instanceofOp(expr.type.qualifiedErasureName)]
 	}
 	
 	def dispatch List<byte[]> compileExpression(XTypeLiteral expr, XtendFunction func){
-		#[ldc(constantPool.addClassEntry(expr.type.qualifiedName))]
+		#[ldc(constantPool.addClassEntry(expr.type.qualifiedErasureName))]
 	}
 	
 	def instanceofOp(String fqn){
@@ -269,7 +315,8 @@ class XtendCompiler {
 			val variable = expr.feature as XtendVariableDeclaration
 			val index = usedLocals.get(func).get(variable)
 			result += compileExpressionToExpectedType(expr.actualArguments.head, func)
-			result += store(expr.actualArguments.head.actualType.type.qualifiedName, index)
+			result += dup
+			result += store(expr.actualArguments.head.actualType.type.qualifiedErasureName, index)
 			result
 		}else{
 			compileExpression(expr as XAbstractFeatureCall, func)
@@ -280,7 +327,7 @@ class XtendCompiler {
 		val result = new ArrayList
 		if (expr.expression != null) {
 			result += compileExpression(expr.expression, func)
-			result += returnType(func.directlyInferredOperation.returnType.qualifiedName)
+			result += returnType(func.directlyInferredOperation.returnType.qualifiedErasureName)
 		} else {
 			result += returnVoid
 		}
@@ -326,15 +373,17 @@ class XtendCompiler {
 		result += expr.^if.compileExpressionToExpectedType(func)
 		
 		val ifJump = newByteArrayOfSize(3)
+		changeStack("ifeq", -1)
 		ifJump.setU1(0, 0x99)
 		
 		result += ifJump
 		
-		val thenBranch = expr.then.compileExpressionToExpectedType(func)
+		val thenBranch = expr.then.compileExpressionAndHandleReturnValue(func)
 		
 		var byte[] elseJump = null
 		if (expr.^else != null){
 			elseJump = newByteArrayOfSize(3)
+			changeStack("goto", 0)
 			elseJump.setU1(0, 0xa7)
 			thenBranch += elseJump
 		}
@@ -362,11 +411,11 @@ class XtendCompiler {
 	def dispatch List<byte[]> compileExpression(XConstructorCall expr, XtendFunction func){
 		val result = new ArrayList
 		
-		result += newObject(expr.constructor.declaringType.qualifiedName)
+		result += newObject(expr.constructor.declaringType.qualifiedErasureName)
 		result += dup
 		for (arg : expr.arguments)
 			result += arg.compileExpressionToExpectedType(func)
-		result += invokeSpecial(constantPool.addMethodEntry(expr.constructor.declaringType.qualifiedName, "<init>", "void", expr.constructor.parameters.map[parameterType.qualifiedName]))
+		result += invokeSpecial(constantPool.addMethodEntry(expr.constructor.declaringType.qualifiedErasureName, "<init>", "void", expr.constructor.parameters.map[parameterType.qualifiedErasureName]))
 		
 		result
 	}
@@ -389,13 +438,13 @@ class XtendCompiler {
 		}else if (expr.feature instanceof XtendVariableDeclaration){
 			val decl = expr.feature as XtendVariableDeclaration
 			val index = usedLocals.get(func).get(decl)
-			result += load(expr.actualType.type.qualifiedName, index)
+			result += load(expr.actualType.type.qualifiedErasureName, index)
 		}else if (expr.feature instanceof JvmFormalParameter){
 			val param = expr.feature as JvmFormalParameter
 			val index = func.directlyInferredOperation.parameters.indexOf(param)
 			if (index == -1)
 				throw new IllegalStateException
-			result += load(param.parameterType.qualifiedName, index + 1)
+			result += load(param.parameterType.qualifiedErasureName, index + 1)
 		}else{
 			throw new UnsupportedOperationException
 		}
@@ -411,27 +460,27 @@ class XtendCompiler {
 		val resolved = typeResolver.resolveTypes(expr)
 		val expected = resolved.getExpectedType(expr)
 		val actual = resolved.getActualType(expr)
-		
-		println("---")
-		println("Expression: " +expr)
-		println("Expected: " + expected)
-		println("Actual: " + actual)
+//		
+//		println("---")
+//		println("Expression: " +expr)
+//		println("Expected: " + expected)
+//		println("Actual: " + actual)
 		if (expected != null && expected.type instanceof JvmVoid){
 			compileExpression(expr, func)
 		}else if (expected != null && actual.type instanceof JvmPrimitiveType && !(expected.type instanceof JvmPrimitiveType)){
 			println("Boxing")
 			val result = new ArrayList
-			result += newObject(actual.type.qualifiedName.boxedVersion)
+			result += newObject(actual.type.qualifiedErasureName.boxedVersion)
 			result += dup
 			result += compileExpression(expr, func)
-			result += invokeSpecial(constantPool.addMethodEntry(actual.type.qualifiedName.boxedVersion, "<init>", "void", #[actual.type.qualifiedName]))
+			result += invokeSpecial(constantPool.addMethodEntry(actual.type.qualifiedErasureName.boxedVersion, "<init>", "void", #[actual.type.qualifiedErasureName]))
 			result
 		}else if (expected != null && expected.type instanceof JvmPrimitiveType && !(actual.type instanceof JvmPrimitiveType)){
 			println("Unboxing")
 			//TODO
 			val result = new ArrayList
 			result += compileExpression(expr, func)
-			result += invokeVirtual(constantPool.addMethodEntry(actual.type.qualifiedName, expected.type.qualifiedName + "Value", expected.type.qualifiedName, #[]))
+			result += invokeVirtual(constantPool.addMethodEntry(actual.type.qualifiedErasureName, expected.type.qualifiedErasureName + "Value", expected.type.qualifiedErasureName, #[]))
 			result
 		}else{
 			compileExpression(expr, func)
@@ -473,7 +522,7 @@ class XtendCompiler {
 		code += loadLocalReference(0)
 		code +=
 			invokeSpecial(
-				constantPool.addMethodEntry(clazz.extends?.qualifiedName ?: "java.lang.Object", "<init>", "void", #[]))
+				constantPool.addMethodEntry(clazz.extends?.qualifiedErasureName ?: "java.lang.Object", "<init>", "void", #[]))
 		code += returnVoid
 
 		var codeLength = 0
@@ -503,21 +552,24 @@ class XtendCompiler {
 	}
 
 	def byte[] invokeSpecial(JvmOperation op) {
+		changeStack("invokeSpecial", (if (op.returnType.type instanceof JvmVoid) 0 else 1) - op.parameters.size)
 		invokeSpecial(
-			constantPool.addMethodEntry(op.declaringType.qualifiedName, op.simpleName, op.returnType.qualifiedName,
-				op.parameters.map[parameterType.qualifiedName]))
+			constantPool.addMethodEntry(op.declaringType.qualifiedErasureName, op.simpleName, op.returnType.qualifiedErasureName,
+				op.parameters.map[parameterType.qualifiedErasureName]))
 	}
 	
 	def byte[] invokeStatic(JvmOperation op) {
+		changeStack("invokeStatic", (if (op.returnType.type instanceof JvmVoid) 0 else 1) - op.parameters.size)
 		invokeStatic(
-			constantPool.addMethodEntry(op.declaringType.qualifiedName, op.simpleName, op.returnType.qualifiedName,
-				op.parameters.map[parameterType.qualifiedName]))
+			constantPool.addMethodEntry(op.declaringType.qualifiedErasureName, op.simpleName, op.returnType.qualifiedErasureName,
+				op.parameters.map[parameterType.qualifiedErasureName]))
 	}
 
 	def byte[] invokeVirtual(JvmOperation op) {
+		changeStack("invokeVirtual", (if (op.returnType.type instanceof JvmVoid) 0 else 1) - op.parameters.size)
 		invokeVirtual(
-			constantPool.addMethodEntry(op.declaringType.qualifiedName, op.simpleName, op.returnType.qualifiedName,
-				op.parameters.map[parameterType.qualifiedName]))
+			constantPool.addMethodEntry(op.declaringType.qualifiedErasureName, op.simpleName, op.returnType.qualifiedErasureName,
+				op.parameters.map[parameterType.qualifiedErasureName]))
 	}
 
 	def byte[] store(String typeFqn, int index) {
@@ -586,7 +638,7 @@ class XtendCompiler {
 
 		result.setU2(0, flags)
 		result.setU2(2, constantPool.addUtf8Entry(field.simpleName))
-		result.setU2(4, constantPool.addUtf8Entry(field.type.qualifiedName.convertToFieldDescriptor))
+		result.setU2(4, constantPool.addUtf8Entry(field.type.qualifiedErasureName.convertToFieldDescriptor))
 		result.setU2(6, 0)
 
 		bytes += result
@@ -625,5 +677,22 @@ class XtendCompiler {
 		val result = freeLocal.get(func)
 		freeLocal.put(func, result + 1)
 		result
+	}
+	
+	def String getQualifiedErasureName(JvmTypeReference type){
+		type.qualifiedName
+//		type.type.qualifiedErasureName
+	}
+	
+	def String getQualifiedErasureName(JvmType type){
+//		if (type instanceof JvmTypeParameter){
+//			var actualType = typeProvider.findDeclaredType("java.lang.Object", type)
+//			for (c : type.constraints.filter[identifier.startsWith("extends")]){
+//				actualType = c.typeReference.type
+//			}
+//			actualType.qualifiedName
+//		}else{
+			type.qualifiedName
+//		}
 	}
 }
