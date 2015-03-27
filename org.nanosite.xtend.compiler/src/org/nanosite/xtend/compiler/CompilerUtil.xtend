@@ -1,8 +1,8 @@
 package org.nanosite.xtend.compiler
 
-import org.eclipse.xtend.core.xtend.XtendClass
-import org.eclipse.xtend.core.xtend.XtendFile
 import java.util.List
+import org.eclipse.xtend.core.xtend.XtendFile
+import org.eclipse.xtend.core.xtend.XtendTypeDeclaration
 
 class CompilerUtil {
 	def static setU1(byte[] bytes, int position, int value){
@@ -45,7 +45,7 @@ class CompilerUtil {
 		result
 	}
 	
-	def static String getQualifiedName(XtendClass clazz){
+	def static String getQualifiedName(XtendTypeDeclaration clazz){
 		(clazz.eContainer as XtendFile).package + "." + clazz.name
 	}
 	

@@ -9,7 +9,8 @@ class CompiledClassTest {
 	def void testSomething(){
 		val instance = new MarcosTestClass
 		instance.someString = "asdasdasd"
+		instance.private = "PRIVATE"
 		assertEquals("asdasdasd", instance.someString)
-		assertEquals("SOMETHINGBLAUAUAUA48", instance.doSomething(7))
+		assertEquals("SOMETHINGBLAUAUAUA48PRIVATEPRIVATE", instance.doSomething(7))
 	}
 }

@@ -11,11 +11,16 @@ import org.eclipse.xtend.core.xtend.XtendFunction
 import org.eclipse.xtend.core.xtend.XtendVariableDeclaration
 import org.eclipse.xtext.common.types.JvmField
 import org.eclipse.xtext.common.types.JvmFormalParameter
+import org.eclipse.xtext.common.types.JvmGenericType
 import org.eclipse.xtext.common.types.JvmIdentifiableElement
 import org.eclipse.xtext.common.types.JvmOperation
 import org.eclipse.xtext.common.types.JvmPrimitiveType
+import org.eclipse.xtext.common.types.JvmType
+import org.eclipse.xtext.common.types.JvmTypeParameter
+import org.eclipse.xtext.common.types.JvmTypeReference
 import org.eclipse.xtext.common.types.JvmVisibility
 import org.eclipse.xtext.common.types.JvmVoid
+import org.eclipse.xtext.common.types.util.TypeReferences
 import org.eclipse.xtext.xbase.XAbstractFeatureCall
 import org.eclipse.xtext.xbase.XAssignment
 import org.eclipse.xtext.xbase.XBasicForLoopExpression
@@ -35,12 +40,6 @@ import org.eclipse.xtext.xbase.typesystem.IBatchTypeResolver
 import static org.nanosite.xtend.compiler.OpcodeFactory.*
 
 import static extension org.nanosite.xtend.compiler.CompilerUtil.*
-import org.eclipse.xtext.common.types.JvmTypeReference
-import org.eclipse.xtext.common.types.JvmType
-import org.eclipse.xtext.common.types.JvmTypeParameter
-import org.eclipse.xtext.xbase.typing.IJvmTypeReferenceProvider
-import org.eclipse.xtext.common.types.access.IJvmTypeProvider
-import org.eclipse.xtext.common.types.util.TypeReferences
 
 class XtendCompiler {
 	protected static final int ACC_PUBLIC = 0x0001
@@ -318,6 +317,21 @@ class XtendCompiler {
 			result += dup
 			result += store(expr.actualArguments.head.actualType.type.qualifiedErasureName, index)
 			result
+		}else if (expr.feature instanceof JvmField){
+			if (expr.actualArguments.size != 1)
+				throw new IllegalStateException
+			val field = expr.feature as JvmField
+			val result = new ArrayList
+			if (!field.static){
+				if (expr.actualReceiver != null){
+					result += expr.actualReceiver.compileExpressionToExpectedType(func)
+				}else{
+					result += aload(0)
+				}
+			}
+			result += expr.actualArguments.head.compileExpressionToExpectedType(func)
+			result += putField(field)
+			result
 		}else{
 			compileExpression(expr as XAbstractFeatureCall, func)
 		}
@@ -424,8 +438,15 @@ class XtendCompiler {
 		val result = new ArrayList
 		if (expr.feature instanceof JvmOperation) {
 			val op = expr.feature as JvmOperation
-			if (!op.static)
-				result += aload(0)
+			if (!op.static){
+				if (expr.actualReceiver != null){
+					result += expr.actualReceiver.compileExpressionToExpectedType(func)
+				}else{
+					// assume the receiver is this
+					result += aload(0)
+				}
+			}
+				
 			for (a : expr.actualArguments)
 				result += a.compileExpressionToExpectedType(func)
 			if (op.static) {
@@ -445,6 +466,24 @@ class XtendCompiler {
 			if (index == -1)
 				throw new IllegalStateException
 			result += load(param.parameterType.qualifiedErasureName, index + 1)
+		}else if (expr.feature instanceof JvmField){
+			val field = expr.feature as JvmField
+			if (!field.static){
+				if (expr.actualReceiver != null){
+					result += expr.actualReceiver.compileExpressionToExpectedType(func)
+				}else{
+					// assume the receiver is this
+					result += aload(0)
+				}
+			}
+			result += getField(field)
+		}else if (expr.feature instanceof JvmGenericType) {
+			val type = expr.feature as JvmGenericType
+			if (func.declaringType.qualifiedName == type.qualifiedName){
+				result += aload(0)
+			}else{
+				throw new IllegalStateException
+			}
 		}else{
 			throw new UnsupportedOperationException
 		}
@@ -571,6 +610,20 @@ class XtendCompiler {
 			constantPool.addMethodEntry(op.declaringType.qualifiedErasureName, op.simpleName, op.returnType.qualifiedErasureName,
 				op.parameters.map[parameterType.qualifiedErasureName]))
 	}
+	
+	def byte[] getField(JvmField field){
+		if (field.static)
+			getStatic(constantPool.addFieldEntry(field.declaringType.qualifiedErasureName, field.simpleName, field.type.qualifiedErasureName))
+		else
+			getField(constantPool.addFieldEntry(field.declaringType.qualifiedErasureName, field.simpleName, field.type.qualifiedErasureName))
+	}
+	
+	def byte[] putField(JvmField field){
+		if (field.static)
+			putStatic(constantPool.addFieldEntry(field.declaringType.qualifiedErasureName, field.simpleName, field.type.qualifiedErasureName))
+		else
+			putField(constantPool.addFieldEntry(field.declaringType.qualifiedErasureName, field.simpleName, field.type.qualifiedErasureName))
+	}
 
 	def byte[] store(String typeFqn, int index) {
 		switch (typeFqn) {
@@ -610,6 +663,7 @@ class XtendCompiler {
 			case "long": lreturn
 			case "short": ireturn
 			case "boolean": ireturn
+			case "void" : returnVoid
 			default: areturn
 		}
 	}
@@ -680,19 +734,18 @@ class XtendCompiler {
 	}
 	
 	def String getQualifiedErasureName(JvmTypeReference type){
-		type.qualifiedName
-//		type.type.qualifiedErasureName
+		type.type.qualifiedErasureName
 	}
 	
 	def String getQualifiedErasureName(JvmType type){
-//		if (type instanceof JvmTypeParameter){
-//			var actualType = typeProvider.findDeclaredType("java.lang.Object", type)
-//			for (c : type.constraints.filter[identifier.startsWith("extends")]){
-//				actualType = c.typeReference.type
-//			}
-//			actualType.qualifiedName
-//		}else{
+		if (type instanceof JvmTypeParameter){
+			var actualType = typeProvider.findDeclaredType("java.lang.Object", type)
+			for (c : type.constraints.filter[identifier.startsWith("extends")]){
+				actualType = c.typeReference.type
+			}
+			actualType.qualifiedName
+		}else{
 			type.qualifiedName
-//		}
+		}
 	}
 }

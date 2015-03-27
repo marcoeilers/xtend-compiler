@@ -12,6 +12,38 @@ class OpcodeFactory {
 		println("New Stack size " + stackSize)
 	}
 	
+	def static byte[] getField(int index){
+		changeStack("getField", 0)
+		val result = newByteArrayOfSize(3)
+		result.setU1(0, 0xb4)
+		result.setU2(1, index)
+		result
+	}
+	
+	def static byte[] getStatic(int index){
+		changeStack("getStatic", 1)
+		val result = newByteArrayOfSize(3)
+		result.setU1(0, 0xb2)
+		result.setU2(1, index)
+		result
+	}
+	
+	def static byte[] putField(int index){
+		changeStack("putField", -2)
+		val result = newByteArrayOfSize(3)
+		result.setU1(0, 0xb5)
+		result.setU2(1, index)
+		result
+	}
+	
+	def static byte[] putStatic(int index){
+		changeStack("putStatic", -1)
+		val result = newByteArrayOfSize(3)
+		result.setU1(0, 0xb3)
+		result.setU2(1, index)
+		result
+	}
+	
 	def static byte[] instanceofOp(int index){
 		val result = newByteArrayOfSize(3)
 		result.setU1(0, 0xc1)

@@ -50,7 +50,15 @@ class CompilerTest {
 				//println("Test123")
 				for (var i = 0; i < aNumber; i = i + 1)
 					blaVar = blaVar + if (i % 2 == 0) "a" else "u"
-				"something" + blaVar + (aVar * 2)
+				"something" + blaVar + (aVar * 2) + privateString + private
+			}
+			
+			def void setPrivate(String someString){
+				privateString = someString
+			}
+			
+			def String getPrivate(){
+				privateString
 			}
 		}
 		'''
